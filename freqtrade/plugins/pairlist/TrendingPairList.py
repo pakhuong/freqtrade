@@ -45,9 +45,23 @@ class TrendingPairList(IPairList):
         self._refresh_period = self._pairlistconfig.get("refresh_period", 1800)
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
         self._ma_period = self._pairlistconfig.get("ma_period", 10)
+        self._lookback_days = self._pairlistconfig.get("lookback_days", 0)
         self._lookback_timeframe = self._pairlistconfig.get("lookback_timeframe", "1d")
+        self._lookback_period = self._pairlistconfig.get("lookback_period", 0)
         self._sort_direction: Optional[str] = self._pairlistconfig.get("sort_direction", "desc")
         self._def_candletype = self._config["candle_type_def"]
+
+        if (self._lookback_days > 0) & (self._lookback_period > 0):
+            raise OperationalException(
+                "Ambiguous configuration: lookback_days and lookback_period both set in pairlist "
+                "config. Please set lookback_days only or lookback_period and lookback_timeframe "
+                "and restart the bot."
+            )
+
+        # overwrite lookback timeframe and days when lookback_days is set
+        if self._lookback_days > 0:
+            self._lookback_timeframe = "1d"
+            self._lookback_period = self._lookback_days
 
         # get timeframe in minutes and seconds
         self._tf_in_min = timeframe_to_minutes(self._lookback_timeframe)
@@ -120,6 +134,12 @@ class TrendingPairList(IPairList):
                 "description": "Number of assets",
                 "help": "Number of assets to use from the pairlist",
             },
+            "ma_period": {
+                "type": "number",
+                "default": 10,
+                "description": "MA Period",
+                "help": "Moving average period to use for trend strength calculation.",
+            },
             "sort_key": {
                 "type": "option",
                 "default": "trendStrength",
@@ -127,18 +147,31 @@ class TrendingPairList(IPairList):
                 "description": "Sort key",
                 "help": "Sort key to use for sorting the pairlist.",
             },
+            "sort_direction": {
+                "type": "option",
+                "default": "desc",
+                "options": ["", "asc", "desc"],
+                "description": "Sort pairlist",
+                "help": "Sort Pairlist ascending or descending by rate of change.",
+            },
             **IPairList.refresh_period_parameter(),
+            "lookback_days": {
+                "type": "number",
+                "default": 0,
+                "description": "Lookback Days",
+                "help": "Number of days to look back at.",
+            },
             "lookback_timeframe": {
                 "type": "string",
                 "default": "",
                 "description": "Lookback Timeframe",
                 "help": "Timeframe to use for lookback.",
             },
-            "ma_period": {
+            "lookback_period": {
                 "type": "number",
-                "default": 10,
-                "description": "MA Period",
-                "help": "Moving average period to use for trend strength calculation.",
+                "default": 0,
+                "description": "Lookback Period",
+                "help": "Number of periods to look back at.",
             },
         }
 
@@ -203,7 +236,8 @@ class TrendingPairList(IPairList):
                         self._lookback_timeframe,
                         dt_now()
                         + timedelta(
-                            minutes=-((self._ma_period + 1) * self._tf_in_min) - self._tf_in_min
+                            minutes=-((self._ma_period + self._lookback_period) * self._tf_in_min)
+                            - self._tf_in_min
                         ),
                     ).timestamp()
                 )
@@ -221,7 +255,7 @@ class TrendingPairList(IPairList):
 
             # todo: utc date output for starting date
             self.log_once(
-                f"Using trading range of {self._ma_period + 1} candles, timeframe: "
+                f"Using trading range of {self._ma_period + self._lookback_period} candles, timeframe: "
                 f"{self._lookback_timeframe}, starting from {format_ms_time(since_ms)} "
                 f"till {format_ms_time(to_ms)}",
                 logger.info,
@@ -246,8 +280,8 @@ class TrendingPairList(IPairList):
                     pair_candles["ma"] = pair_candles["close"].rolling(self._ma_period).mean()
 
                     pair_candles["trendStrength"] = abs(
-                        (pair_candles["ma"] - pair_candles["ma"].shift(1))
-                        / pair_candles["ma"].shift(1)
+                        (pair_candles["ma"] - pair_candles["ma"].shift(self._lookback_period))
+                        / pair_candles["ma"].shift(self._lookback_period)
                         * 100
                     )
 
