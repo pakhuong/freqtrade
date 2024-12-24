@@ -30,14 +30,7 @@ class BreakoutPairList(IPairList):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
-        if "number_assets" not in self._pairlistconfig:
-            raise OperationalException(
-                "`number_assets` not specified. Please check your configuration "
-                'for "pairlist.config.number_assets"'
-            )
-
         self._stake_currency = self._config["stake_currency"]
-        self._number_pairs = self._pairlistconfig["number_assets"]
         self._refresh_period = self._pairlistconfig.get("refresh_period", 1800)
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
 
@@ -73,7 +66,7 @@ class BreakoutPairList(IPairList):
         """
         Short pairlist method description - used for startup-messages
         """
-        return f"{self.name} - top {self._pairlistconfig['number_assets']} breakout pairs."
+        return f"{self.name} - list of breakout pairs."
 
     @staticmethod
     def description() -> str:
@@ -82,12 +75,6 @@ class BreakoutPairList(IPairList):
     @staticmethod
     def available_parameters() -> dict[str, PairlistParameter]:
         return {
-            "number_assets": {
-                "type": "number",
-                "default": 30,
-                "description": "Number of assets",
-                "help": "Number of assets to use from the pairlist",
-            },
             **IPairList.refresh_period_parameter(),
         }
 
@@ -149,6 +136,7 @@ class BreakoutPairList(IPairList):
         candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms)
 
         filtered_pairs = []
+
         for p in pairlist:
             pair_candles = candles.get(
                 (p, self._lookback_timeframe, self._config["candle_type_def"])
@@ -178,8 +166,5 @@ class BreakoutPairList(IPairList):
         # Validate whitelist to only have active market pairs
         filtered_pairs = self._whitelist_for_active_markets(filtered_pairs)
         filtered_pairs = self.verify_blacklist(filtered_pairs, logmethod=logger.info)
-
-        # Limit pairlist to the requested number of pairs
-        filtered_pairs = filtered_pairs[: self._number_pairs]
 
         return filtered_pairs
