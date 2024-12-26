@@ -14,6 +14,7 @@ from freqtrade.util import dt_now, format_ms_time
 
 logger = logging.getLogger(__name__)
 
+MODE_VALUES = ["breakout", "inside_day"]
 
 class BreakoutPairList(IPairList):
     """
@@ -31,6 +32,7 @@ class BreakoutPairList(IPairList):
         super().__init__(*args, **kwargs)
 
         self._stake_currency = self._config["stake_currency"]
+        self._mode: Literal["breakout", "inside_day"] = self._pairlistconfig.get("mode", "breakout")
         self._refresh_period = self._pairlistconfig.get("refresh_period", 1800)
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
 
@@ -66,15 +68,22 @@ class BreakoutPairList(IPairList):
         """
         Short pairlist method description - used for startup-messages
         """
-        return f"{self.name} - list of breakout pairs."
+        return f"{self.name} - list of pairs with breakout/inside-day."
 
     @staticmethod
     def description() -> str:
-        return "Provides dynamic pair list based on daily breakout patterns."
+        return "Provides dynamic pair list based on daily breakout or inside-day patterns."
 
     @staticmethod
     def available_parameters() -> dict[str, PairlistParameter]:
         return {
+            "mode": {
+                "type": "option",
+                "default": "breakout",
+                "options": MODE_VALUES,
+                "description": "Mode",
+                "help": "Mode to use for pair list generation.",
+            },
             **IPairList.refresh_period_parameter(),
         }
 
@@ -85,9 +94,11 @@ class BreakoutPairList(IPairList):
         :return: List of pairs
         """
         pairlist = self._pair_cache.get("pairlist")
+
         if pairlist:
             # Item found - no refresh necessary
             return pairlist.copy()
+
         else:
             # Use fresh pairlist
             # Check if pair quote currency equals to the stake currency.
@@ -141,6 +152,7 @@ class BreakoutPairList(IPairList):
             pair_candles = candles.get(
                 (p, self._lookback_timeframe, self._config["candle_type_def"])
             )
+
             if pair_candles is not None and len(pair_candles) >= self._candle_count:
                 # We only need the last two rows (yesterday and current)
                 last_two = pair_candles.iloc[-2:]
@@ -153,15 +165,23 @@ class BreakoutPairList(IPairList):
                 curr_high = curr_day["high"]
                 curr_low = curr_day["low"]
 
-                # Condition 1: Current day's close is outside the previous day's high/low range
-                outside_range = (curr_close > prev_high) or (curr_close < prev_low)
+                if self._mode == "breakout":
+                    # Condition 1: Current day's close is outside the previous day's high/low range
+                    outside_range = (curr_close > prev_high) or (curr_close < prev_low)
 
-                # Condition 2: Either (higher high & higher low) OR (lower high & lower low)
-                higher_high_low = (curr_high > prev_high) and (curr_low > prev_low)
-                lower_high_low = (curr_high < prev_high) and (curr_low < prev_low)
+                    # Condition 2: Either (higher high & higher low) OR (lower high & lower low)
+                    higher_high_low = (curr_high > prev_high) and (curr_low > prev_low)
+                    lower_high_low = (curr_high < prev_high) and (curr_low < prev_low)
 
-                if outside_range and (higher_high_low or lower_high_low):
-                    filtered_pairs.append(p)
+                    if outside_range and (higher_high_low or lower_high_low):
+                        filtered_pairs.append(p)
+
+                elif self._mode == "inside_day":
+                    # Condition 1: Current day's close is inside the previous day's high/low range
+                    inside_range = (curr_close < prev_high) and (curr_close > prev_low)
+
+                    if inside_range:
+                        filtered_pairs.append(p)
 
         # Validate whitelist to only have active market pairs
         filtered_pairs = self._whitelist_for_active_markets(filtered_pairs)
