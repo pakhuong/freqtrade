@@ -37,14 +37,17 @@ class BreakoutPairList(IPairList):
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
 
         # We need daily candles to check daily breakouts.
-        self._lookback_timeframe = "1d"
+        self._lookback_timeframe = self._pairlistconfig.get("lookback_timeframe", "1d")
+
         # We need at least 2 days of data (yesterday and today).
         self._candle_count = 2
 
         # Validate refresh period (1 day = 1440 min -> 86400 s)
         # Though it's not strictly required to be that long, let's just note it.
         self._tf_in_min = timeframe_to_minutes(self._lookback_timeframe)
+
         _tf_in_sec = self._tf_in_min * 60
+
         if self._refresh_period < _tf_in_sec:
             logger.info(
                 f"Refresh period {self._refresh_period}s is less than one daily candle interval "
@@ -85,6 +88,12 @@ class BreakoutPairList(IPairList):
                 "help": "Mode to use for pair list generation.",
             },
             **IPairList.refresh_period_parameter(),
+            "lookback_timeframe": {
+                "type": "string",
+                "default": "1d",
+                "description": "Lookback Timeframe",
+                "help": "Timeframe to use for lookback.",
+            },
         }
 
     def gen_pairlist(self, tickers: Tickers) -> list[str]:
@@ -122,20 +131,28 @@ class BreakoutPairList(IPairList):
         Filter and return pairs that meet the breakout criteria.
         """
         # Determine the period for candle retrieval
-        # We need at least the last 2 daily candles (yesterday and today)
+        # We need at least the last 2 period candles
         since_ms = (
             int(
                 timeframe_to_prev_date(
-                    self._lookback_timeframe, dt_now() - timedelta(days=self._candle_count)
+                    self._lookback_timeframe,
+                    dt_now() + timedelta(minutes=-(2 * self._tf_in_min) - self._tf_in_min),
                 ).timestamp()
             )
             * 1000
         )
 
-        to_ms = int(timeframe_to_prev_date(self._lookback_timeframe, dt_now()).timestamp()) * 1000
+        to_ms = (
+            int(
+                timeframe_to_prev_date(
+                    self._lookback_timeframe, dt_now() - timedelta(minutes=self._tf_in_min)
+                ).timestamp()
+            )
+            * 1000
+        )
 
         self.log_once(
-            f"Fetching {self._candle_count} daily candles from {format_ms_time(since_ms)} "
+            f"Fetching {self._candle_count} {self._lookback_timeframe} candles from {format_ms_time(since_ms)} "
             f"to {format_ms_time(to_ms)}",
             logger.info,
         )
@@ -154,16 +171,16 @@ class BreakoutPairList(IPairList):
             )
 
             if pair_candles is not None and len(pair_candles) >= self._candle_count:
-                # We only need the last two rows (yesterday and current)
+                # We only need the last two rows
                 last_two = pair_candles.iloc[-2:]
-                prev_day = last_two.iloc[0]
-                curr_day = last_two.iloc[1]
+                prev_period = last_two.iloc[0]
+                curr_period = last_two.iloc[1]
 
-                prev_high = prev_day["high"]
-                prev_low = prev_day["low"]
-                curr_close = curr_day["close"]
-                curr_high = curr_day["high"]
-                curr_low = curr_day["low"]
+                prev_high = prev_period["high"]
+                prev_low = prev_period["low"]
+                curr_close = curr_period["close"]
+                curr_high = curr_period["high"]
+                curr_low = curr_period["low"]
 
                 if self._mode == "breakout":
                     # Condition 1: Current day's close is outside the previous day's high/low range
