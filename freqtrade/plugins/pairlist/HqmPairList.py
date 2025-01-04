@@ -111,6 +111,7 @@ class HqmPairList(IPairList):
         # Generate dynamic whitelist
         # Must always run if this pairlist is not the first in the list.
         pairlist = self._pair_cache.get("pairlist")
+
         if pairlist:
             # Item found - no refresh necessary
             return pairlist.copy()
@@ -123,8 +124,10 @@ class HqmPairList(IPairList):
                     quote_currencies=[self._stake_currency], tradable_only=True, active_only=True
                 ).keys()
             ]
+
             # No point in testing for blacklisted pairs...
             _pairlist = self.verify_blacklist(_pairlist, logger.info)
+
             if not self._use_range:
                 filtered_tickers = [
                     v
@@ -135,6 +138,7 @@ class HqmPairList(IPairList):
                         and v["symbol"] in _pairlist
                     )
                 ]
+
                 pairlist = [s["symbol"] for s in filtered_tickers]
             else:
                 pairlist = _pairlist
@@ -152,155 +156,124 @@ class HqmPairList(IPairList):
         :param tickers: Tickers (from exchange.get_tickers). May be cached.
         :return: new whitelist
         """
-        if self._use_range:
-            # Create bare minimum from tickers structure.
-            filtered_tickers: list[dict[str, Any]] = [{"symbol": k} for k in pairlist]
+        # Create bare minimum from tickers structure.
+        filtered_tickers: list[dict[str, Any]] = [{"symbol": k} for k in pairlist]
 
-            # get lookback period in ms, for exchange ohlcv fetch
-            since_ms = (
-                int(
-                    timeframe_to_prev_date(
-                        self._lookback_timeframe,
-                        dt_now()
-                        + timedelta(
-                            minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min
-                        ),
-                    ).timestamp()
-                )
-                * 1000
+        # get lookback period in ms, for exchange ohlcv fetch
+        since_ms = (
+            int(
+                timeframe_to_prev_date(
+                    self._lookback_timeframe,
+                    dt_now()
+                    + timedelta(
+                        minutes=-(self._lookback_period * self._tf_in_min) - self._tf_in_min
+                    ),
+                ).timestamp()
             )
-
-            to_ms = (
-                int(
-                    timeframe_to_prev_date(
-                        self._lookback_timeframe, dt_now() - timedelta(minutes=self._tf_in_min)
-                    ).timestamp()
-                )
-                * 1000
-            )
-
-            # todo: utc date output for starting date
-            self.log_once(
-                f"Using trading range of {self._lookback_period} candles, timeframe: "
-                f"{self._lookback_timeframe}, starting from {format_ms_time(since_ms)} "
-                f"till {format_ms_time(to_ms)}",
-                logger.info,
-            )
-
-            needed_pairs: ListPairsWithTimeframes = [
-                (p, self._lookback_timeframe, self._def_candletype)
-                for p in [s["symbol"] for s in filtered_tickers]
-                if p not in self._pair_cache
-            ]
-
-            candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms)
-
-            hqm_columns = [
-                "Symbol",
-                "Price",
-                "One-Day Price Return",
-                "One-Day Return Percentile",
-                "One-Week Price Return",
-                "One-Week Return Percentile",
-                "One-Month Price Return",
-                "One-Month Return Percentile",
-                "HQM Score",
-            ]
-
-            hqm_dataframe = pd.DataFrame(columns=hqm_columns)
-
-            for i, p in enumerate(filtered_tickers):
-                pair_candles = (
-                    candles[(p["symbol"], self._lookback_timeframe, self._def_candletype)]
-                    if (p["symbol"], self._lookback_timeframe, self._def_candletype) in candles
-                    else None
-                )
-
-                # in case of candle data calculate simple moving average and trend strength
-                if pair_candles is not None and not pair_candles.empty:
-                    pair_candles["return_1d"] = pair_candles["close"].pct_change(1)
-                    pair_candles["return_1w"] = pair_candles["close"].pct_change(7)
-                    pair_candles["return_1m"] = pair_candles["close"].pct_change(30)
-
-                    new_hqm_row = pd.Series(
-                        [
-                            p["symbol"],
-                            pair_candles["close"].iloc[-1],
-                            pair_candles["return_1d"].iloc[-1],
-                            "N/A",
-                            pair_candles["return_1w"].iloc[-1],
-                            "N/A",
-                            pair_candles["return_1m"].iloc[-1],
-                            "N/A",
-                            "N/A",
-                        ],
-                        index=hqm_columns,
-                    )
-
-                    hqm_dataframe = pd.concat(
-                        [hqm_dataframe, new_hqm_row.to_frame().T], ignore_index=True
-                    )
-                else:
-                    new_hqm_row = pd.Series(
-                        [
-                            p["symbol"],
-                            "N/A",
-                            "N/A",
-                            "N/A",
-                            "N/A",
-                            "N/A",
-                            "N/A",
-                            "N/A",
-                            "N/A",
-                        ],
-                        index=hqm_columns,
-                    )
-
-                    hqm_dataframe = pd.concat(
-                        [hqm_dataframe, new_hqm_row.to_frame().T], ignore_index=True
-                    )
-
-            time_periods = ["One-Day", "One-Week", "One-Month"]
-
-            for row in hqm_dataframe.index:
-                for time_period in time_periods:
-                    hqm_dataframe.loc[row, f"{time_period} Return Percentile"] = (
-                        stats.percentileofscore(
-                            hqm_dataframe[f"{time_period} Price Return"],
-                            hqm_dataframe.loc[row, f"{time_period} Price Return"],
-                        )
-                    )
-
-            for row in hqm_dataframe.index:
-                momentum_percentiles = []
-
-                for time_period in time_periods:
-                    momentum_percentiles.append(
-                        hqm_dataframe.loc[row, f"{time_period} Return Percentile"]
-                    )
-
-                hqm_dataframe.loc[row, "HQM Score"] = round(mean(momentum_percentiles), 4)
-
-            for i, p in enumerate(filtered_tickers):
-                symbol = p["symbol"]
-
-                hqm_score = hqm_dataframe.loc[
-                    hqm_dataframe["Symbol"] == symbol, "HQM Score"
-                ].values[0]
-
-                filtered_tickers[i]["hqm_score"] = hqm_score
-        else:
-            # Tickers mode - filter based on incoming pairlist.
-            filtered_tickers = [v for k, v in tickers.items() if k in pairlist]
-
-        sorted_tickers = sorted(
-            filtered_tickers,
-            reverse=self._sort_direction == "desc",
-            key=lambda t: t["hqm_score"],
+            * 1000
         )
 
+        to_ms = (
+            int(
+                timeframe_to_prev_date(
+                    self._lookback_timeframe, dt_now() - timedelta(minutes=self._tf_in_min)
+                ).timestamp()
+            )
+            * 1000
+        )
+
+        # todo: utc date output for starting date
+        self.log_once(
+            f"Using trading range of {self._lookback_period} candles, timeframe: "
+            f"{self._lookback_timeframe}, starting from {format_ms_time(since_ms)} "
+            f"till {format_ms_time(to_ms)}",
+            logger.info,
+        )
+
+        needed_pairs: ListPairsWithTimeframes = [
+            (p, self._lookback_timeframe, self._def_candletype)
+            for p in [s["symbol"] for s in filtered_tickers]
+            if p not in self._pair_cache
+        ]
+
+        candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms)
+
+        hqm_columns = [
+            "Symbol",
+            "Price",
+            "One-Day Price Return",
+            "One-Day Return Percentile",
+            "One-Week Price Return",
+            "One-Week Return Percentile",
+            "One-Month Price Return",
+            "One-Month Return Percentile",
+            "HQM Score",
+        ]
+
+        hqm_dataframe = pd.DataFrame(columns=hqm_columns)
+
+        for i, p in enumerate(filtered_tickers):
+            pair_candles = (
+                candles[(p["symbol"], self._lookback_timeframe, self._def_candletype)]
+                if (p["symbol"], self._lookback_timeframe, self._def_candletype) in candles
+                else None
+            )
+
+            # in case of candle data calculate simple moving average and trend strength
+            if (
+                pair_candles is not None
+                and not pair_candles.empty
+                and not len(pair_candles.index) < 30
+            ):
+                pair_candles["return_1d"] = pair_candles["close"].pct_change(1)
+                pair_candles["return_1w"] = pair_candles["close"].pct_change(7)
+                pair_candles["return_1m"] = pair_candles["close"].pct_change(30)
+
+                new_hqm_row = pd.Series(
+                    [
+                        p["symbol"],
+                        pair_candles["close"].iloc[-1],
+                        pair_candles["return_1d"].iloc[-1],
+                        "N/A",
+                        pair_candles["return_1w"].iloc[-1],
+                        "N/A",
+                        pair_candles["return_1m"].iloc[-1],
+                        "N/A",
+                        "N/A",
+                    ],
+                    index=hqm_columns,
+                )
+
+                hqm_dataframe = pd.concat(
+                    [hqm_dataframe, new_hqm_row.to_frame().T], ignore_index=True
+                )
+
+        time_periods = ["One-Day", "One-Week", "One-Month"]
+
+        for row in hqm_dataframe.index:
+            for time_period in time_periods:
+                hqm_dataframe.loc[row, f"{time_period} Return Percentile"] = (
+                    stats.percentileofscore(
+                        hqm_dataframe[f"{time_period} Price Return"],
+                        hqm_dataframe.loc[row, f"{time_period} Price Return"],
+                    )
+                )
+
+        for row in hqm_dataframe.index:
+            momentum_percentiles = []
+
+            for time_period in time_periods:
+                momentum_percentiles.append(
+                    hqm_dataframe.loc[row, f"{time_period} Return Percentile"]
+                )
+
+            hqm_dataframe.loc[row, "HQM Score"] = round(mean(momentum_percentiles), 4)
+
+        hqm_dataframe = hqm_dataframe.sort_values(by="HQM Score", ascending=False)
+        sorted_tickers = hqm_dataframe["Symbol"].tolist()
+
         # Validate whitelist to only have active market pairs
-        pairs = self._whitelist_for_active_markets([s["symbol"] for s in sorted_tickers])
+        pairs = self._whitelist_for_active_markets([s for s in sorted_tickers])
         pairs = self.verify_blacklist(pairs, logmethod=logger.info)
         # Limit pairlist to the requested number of pairs
         pairs = pairs[: self._number_pairs]
