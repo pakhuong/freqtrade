@@ -57,6 +57,7 @@ AVAILABLE_PAIRLISTS = [
     "ShuffleFilter",
     "SpreadFilter",
     "VolatilityFilter",
+    "HqmPairList",
 ]
 AVAILABLE_DATAHANDLERS = ["json", "jsongz", "hdf5", "feather", "parquet"]
 BACKTEST_BREAKDOWNS = ["day", "week", "month"]
