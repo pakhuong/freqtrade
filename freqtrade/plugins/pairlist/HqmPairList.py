@@ -42,7 +42,7 @@ class HqmPairList(IPairList):
         self._refresh_period = self._pairlistconfig.get("refresh_period", 86400)
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
         self._lookback_timeframe = "1d"
-        self._lookback_period = 30
+        self._lookback_period = 35
         self._sort_direction: str | None = self._pairlistconfig.get("sort_direction", "desc")
         self._def_candletype = self._config["candle_type_def"]
 
@@ -223,7 +223,7 @@ class HqmPairList(IPairList):
             if (
                 pair_candles is not None
                 and not pair_candles.empty
-                and not len(pair_candles.index) < 30
+                and not len(pair_candles.index) < self._lookback_period
             ):
                 pair_candles["return_1d"] = pair_candles["close"].pct_change(1)
                 pair_candles["return_1w"] = pair_candles["close"].pct_change(7)
