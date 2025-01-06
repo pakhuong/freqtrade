@@ -41,8 +41,8 @@ class HqmPairList(IPairList):
         self._number_pairs = self._pairlistconfig["number_assets"]
         self._refresh_period = self._pairlistconfig.get("refresh_period", 86400)
         self._pair_cache: TTLCache = TTLCache(maxsize=1, ttl=self._refresh_period)
-        self._lookback_timeframe = "1d"
-        self._lookback_period = 35
+        self._lookback_timeframe = self._pairlistconfig.get("lookback_timeframe", "1d")
+        self._lookback_period = 26
         self._sort_direction: str | None = self._pairlistconfig.get("sort_direction", "desc")
         self._def_candletype = self._config["candle_type_def"]
 
@@ -100,6 +100,12 @@ class HqmPairList(IPairList):
                 "help": "Sort Pairlist ascending or descending by rate of change.",
             },
             **IPairList.refresh_period_parameter(),
+            "lookback_timeframe": {
+                "type": "string",
+                "default": "1d",
+                "description": "Lookback Timeframe",
+                "help": "Timeframe to use for lookback.",
+            },
         }
 
     def gen_pairlist(self, tickers: Tickers) -> list[str]:
@@ -199,15 +205,15 @@ class HqmPairList(IPairList):
         candles = self._exchange.refresh_ohlcv_with_cache(needed_pairs, since_ms)
 
         hqm_columns = [
-            "Symbol",
-            "Price",
-            "One-Day Price Return",
-            "One-Day Return Percentile",
-            "One-Week Price Return",
-            "One-Week Return Percentile",
-            "One-Month Price Return",
-            "One-Month Return Percentile",
-            "HQM Score",
+            "symbol",
+            "price",
+            "roc_lips",
+            "roc_lips_percentile",
+            "roc_teeth",
+            "roc_teeth_percentile",
+            "roc_jaw",
+            "roc_jaw_percentile",
+            "hqm_score",
         ]
 
         hqm_dataframe = pd.DataFrame(columns=hqm_columns)
@@ -219,25 +225,29 @@ class HqmPairList(IPairList):
                 else None
             )
 
-            # in case of candle data calculate simple moving average and trend strength
+            # in case of candle data calculate alligator indicator and percent change
             if (
                 pair_candles is not None
                 and not pair_candles.empty
                 and not len(pair_candles.index) < self._lookback_period
             ):
-                pair_candles["return_1d"] = pair_candles["close"].pct_change(1)
-                pair_candles["return_1w"] = pair_candles["close"].pct_change(7)
-                pair_candles["return_1m"] = pair_candles["close"].pct_change(30)
+                pair_candles["median_price"] = (pair_candles["high"] + pair_candles["low"]) / 2
+                pair_candles["lips"] = self.smma(pair_candles["median_price"], period=5)
+                pair_candles["teeth"] = self.smma(pair_candles["median_price"], period=8)
+                pair_candles["jaw"] = self.smma(pair_candles["median_price"], period=13)
+                pair_candles["roc_lips"] = pair_candles["lips"].pct_change()
+                pair_candles["roc_teeth"] = pair_candles["teeth"].pct_change()
+                pair_candles["roc_jaw"] = pair_candles["jaw"].pct_change()
 
                 new_hqm_row = pd.Series(
                     [
                         p["symbol"],
                         pair_candles["close"].iloc[-1],
-                        pair_candles["return_1d"].iloc[-1],
+                        pair_candles["roc_lips"].iloc[-1],
                         "N/A",
-                        pair_candles["return_1w"].iloc[-1],
+                        pair_candles["roc_teeth"].iloc[-1],
                         "N/A",
-                        pair_candles["return_1m"].iloc[-1],
+                        pair_candles["roc_jaw"].iloc[-1],
                         "N/A",
                         "N/A",
                     ],
@@ -248,29 +258,25 @@ class HqmPairList(IPairList):
                     [hqm_dataframe, new_hqm_row.to_frame().T], ignore_index=True
                 )
 
-        time_periods = ["One-Day", "One-Week", "One-Month"]
+        rocs = ["roc_lips", "roc_teeth", "roc_jaw"]
 
         for row in hqm_dataframe.index:
-            for time_period in time_periods:
-                hqm_dataframe.loc[row, f"{time_period} Return Percentile"] = (
-                    stats.percentileofscore(
-                        hqm_dataframe[f"{time_period} Price Return"],
-                        hqm_dataframe.loc[row, f"{time_period} Price Return"],
-                    )
+            for roc in rocs:
+                hqm_dataframe.loc[row, f"{roc}_percentile"] = stats.percentileofscore(
+                    hqm_dataframe[roc],
+                    hqm_dataframe.loc[row, roc],
                 )
 
         for row in hqm_dataframe.index:
             momentum_percentiles = []
 
-            for time_period in time_periods:
-                momentum_percentiles.append(
-                    hqm_dataframe.loc[row, f"{time_period} Return Percentile"]
-                )
+            for roc in rocs:
+                momentum_percentiles.append(hqm_dataframe.loc[row, f"{roc}_percentile"])
 
-            hqm_dataframe.loc[row, "HQM Score"] = round(mean(momentum_percentiles), 4)
+            hqm_dataframe.loc[row, "hqm_score"] = round(mean(momentum_percentiles), 4)
 
-        hqm_dataframe = hqm_dataframe.sort_values(by="HQM Score", ascending=False)
-        sorted_tickers = hqm_dataframe["Symbol"].tolist()
+        hqm_dataframe = hqm_dataframe.sort_values(by="hqm_score", ascending=False)
+        sorted_tickers = hqm_dataframe["symbol"].tolist()
 
         # Validate whitelist to only have active market pairs
         pairs = self._whitelist_for_active_markets([s for s in sorted_tickers])
@@ -279,3 +285,6 @@ class HqmPairList(IPairList):
         pairs = pairs[: self._number_pairs]
 
         return pairs
+
+    def smma(self, series: pd.Series, period: int) -> pd.Series:
+        return series.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
